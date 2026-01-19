@@ -496,6 +496,198 @@ PRAGMA journal_mode = WAL;
 
 ---
 
+## Sortable Binary Encoding Functions (BES19)
+
+### The Problem
+
+SQLite stores numbers as TEXT or as native INTEGER/REAL types. But what if you need to:
+- Store numbers in BLOBs for compact binary storage?
+- Have those BLOBs sort correctly with `ORDER BY`?
+- Get microsecond-precision timestamps that sort chronologically?
+
+Standard binary encoding (little-endian or even big-endian) doesn't sort correctly:
+- Signed integers: -1 would sort AFTER +1 (wrong!)
+- Floats: Negative numbers sort incorrectly relative to positive
+
+### The Solution: BES19 Functions
+
+19 built-in functions that encode numbers into BLOBs using **sortable big-endian** format. When you `ORDER BY` these BLOBs, they sort in correct numerical order using raw byte comparison.
+
+### How It Works
+
+**For unsigned integers:** Simple big-endian encoding (most significant byte first).
+
+**For signed integers:** Big-endian with the sign bit flipped. This transforms the sort order:
+- Original: 0x8000... (most negative) sorts AFTER 0x7FFF... (most positive)
+- Transformed: 0x0000... (most negative) sorts BEFORE 0xFFFF... (most positive)
+
+**For IEEE 754 floats:** A clever transformation:
+- Positive floats: Flip the sign bit (0→1), so they sort after negative
+- Negative floats: Flip ALL bits, so more-negative values sort before less-negative
+
+**For timestamps:** Epoch microseconds as a signed 64-bit integer, giving:
+- Range: ~292,000 years before/after Unix epoch
+- Precision: 1 microsecond
+- Sortability: Chronological order guaranteed
+
+### Function Reference
+
+#### Encoding Functions (Number → Sortable BLOB)
+
+| Function | Input | Output | Description |
+|----------|-------|--------|-------------|
+| `to_u16bes(n)` | 0 to 65,535 | 2-byte BLOB | Unsigned 16-bit |
+| `to_u32bes(n)` | 0 to 4,294,967,295 | 4-byte BLOB | Unsigned 32-bit |
+| `to_u64bes(n)` | 0 to 18,446,744,073,709,551,615 | 8-byte BLOB | Unsigned 64-bit |
+| `to_i16bes(n)` | -32,768 to 32,767 | 2-byte BLOB | Signed 16-bit |
+| `to_i32bes(n)` | -2,147,483,648 to 2,147,483,647 | 4-byte BLOB | Signed 32-bit |
+| `to_i64bes(n)` | Full 64-bit signed range | 8-byte BLOB | Signed 64-bit |
+| `to_f16bes(n)` | IEEE 754 half-precision | 2-byte BLOB | 16-bit float |
+| `to_f32bes(n)` | IEEE 754 single-precision | 4-byte BLOB | 32-bit float |
+| `to_f64bes(n)` | IEEE 754 double-precision | 8-byte BLOB | 64-bit float |
+| `to_t64bes()` | (no arguments) | 8-byte BLOB | Current epoch microseconds |
+
+#### Decoding Functions (BLOB → Number)
+
+| Function | Input | Output | Description |
+|----------|-------|--------|-------------|
+| `from_u16bes(b)` | 2-byte BLOB | INTEGER | Unsigned 16-bit |
+| `from_u32bes(b)` | 4-byte BLOB | INTEGER | Unsigned 32-bit |
+| `from_u64bes(b)` | 8-byte BLOB | INTEGER | Unsigned 64-bit |
+| `from_i16bes(b)` | 2-byte BLOB | INTEGER | Signed 16-bit |
+| `from_i32bes(b)` | 4-byte BLOB | INTEGER | Signed 32-bit |
+| `from_i64bes(b)` | 8-byte BLOB | INTEGER | Signed 64-bit |
+| `from_f16bes(b)` | 2-byte BLOB | REAL | 16-bit float |
+| `from_f32bes(b)` | 4-byte BLOB | REAL | 32-bit float |
+| `from_f64bes(b)` | 8-byte BLOB | REAL | 64-bit float |
+
+### Usage Examples
+
+#### Basic Round-Trip
+```sql
+-- Encode and decode
+SELECT from_i64bes(to_i64bes(-12345));  -- Returns: -12345
+SELECT from_f64bes(to_f64bes(3.14159)); -- Returns: 3.14159
+SELECT from_i64bes(to_t64bes());        -- Returns: current epoch microseconds
+```
+
+#### Sortable Timestamps
+```sql
+-- Create table with sortable timestamp
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  created_at BLOB NOT NULL,  -- Stores to_t64bes()
+  event_type TEXT,
+  data TEXT
+);
+
+-- Insert with automatic timestamp
+INSERT INTO events (created_at, event_type, data)
+VALUES (to_t64bes(), 'user_login', '{"user_id": 123}');
+
+-- Query in chronological order (BLOB comparison = time order!)
+SELECT 
+  id,
+  from_i64bes(created_at) as epoch_us,
+  datetime(from_i64bes(created_at) / 1000000, 'unixepoch') as human_time,
+  event_type
+FROM events
+ORDER BY created_at;  -- Sorts chronologically!
+
+-- Range query (last hour)
+SELECT * FROM events
+WHERE created_at > to_i64bes((strftime('%s', 'now') - 3600) * 1000000);
+```
+
+#### Compact Numeric Storage
+```sql
+-- Store sensor readings compactly
+CREATE TABLE sensor_data (
+  sensor_id INTEGER,
+  timestamp BLOB,      -- 8 bytes (to_t64bes)
+  temperature BLOB,    -- 4 bytes (to_f32bes) 
+  humidity BLOB,       -- 2 bytes (to_u16bes, 0-65535 = 0.00-655.35%)
+  PRIMARY KEY (sensor_id, timestamp)
+);
+
+-- Insert reading
+INSERT INTO sensor_data VALUES (
+  1,
+  to_t64bes(),
+  to_f32bes(23.5),
+  to_u16bes(6520)  -- 65.20%
+);
+
+-- Query with decoded values
+SELECT 
+  sensor_id,
+  from_i64bes(timestamp) as ts,
+  from_f32bes(temperature) as temp_c,
+  from_u16bes(humidity) / 100.0 as humidity_pct
+FROM sensor_data
+WHERE sensor_id = 1
+ORDER BY timestamp DESC
+LIMIT 100;
+```
+
+#### Signed Integer Sorting Proof
+```sql
+-- Demonstrate correct sorting of signed integers
+CREATE TABLE signed_test (val BLOB);
+INSERT INTO signed_test VALUES 
+  (to_i64bes(-1000)),
+  (to_i64bes(-1)),
+  (to_i64bes(0)),
+  (to_i64bes(1)),
+  (to_i64bes(1000));
+
+-- ORDER BY BLOB gives correct numerical order!
+SELECT from_i64bes(val) as decoded FROM signed_test ORDER BY val;
+-- Returns: -1000, -1, 0, 1, 1000 (correct!)
+```
+
+#### Float Sorting Proof
+```sql
+-- Demonstrate correct sorting of floats (including negatives)
+CREATE TABLE float_test (val BLOB);
+INSERT INTO float_test VALUES 
+  (to_f64bes(-1000.5)),
+  (to_f64bes(-0.001)),
+  (to_f64bes(0.0)),
+  (to_f64bes(0.001)),
+  (to_f64bes(1000.5));
+
+-- ORDER BY BLOB gives correct numerical order!
+SELECT from_f64bes(val) as decoded FROM float_test ORDER BY val;
+-- Returns: -1000.5, -0.001, 0.0, 0.001, 1000.5 (correct!)
+```
+
+### Why Use BES19?
+
+1. **Compact Storage**: A BLOB column with `to_i32bes()` uses exactly 4 bytes per row, vs variable-length TEXT.
+
+2. **Sortable Without Decoding**: `ORDER BY blob_column` works correctly without calling decode functions.
+
+3. **Index-Friendly**: Create indexes on BLOB columns; they'll sort correctly.
+
+4. **Microsecond Timestamps**: `to_t64bes()` gives you sub-millisecond precision that SQLite's `datetime()` can't match.
+
+5. **Cross-Platform**: Works identically on Windows, Linux, and macOS.
+
+6. **No Extensions Needed**: Built into the SQLite binary—always available.
+
+### Limitations
+
+- **NaN handling**: Not guaranteed to sort correctly (but regular numbers work fine)
+- **Positive/negative zero**: May not be distinguished (rarely matters in practice)
+- **Overflow**: Passing values outside the type's range produces undefined results
+
+### Technical Details
+
+The encoding is **endianness-independent**—the C code explicitly constructs bytes in the correct order regardless of the host CPU's native byte order. This ensures databases are portable across architectures.
+
+---
+
 ## Common Patterns
 
 ### Full-Text Search + Semantic Search

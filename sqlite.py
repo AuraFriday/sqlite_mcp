@@ -63,9 +63,9 @@ Let me review the key issues we identified earlier from our research and testing
    - No result size limits
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
-"signature": "Ⅰҳ𝟦wԝƧ6ᛕɯZꓐƻᒿcᴍƿbԝƴPᴛϹGwᏂDIWƦνɡ7ɌW𝟙ƊᴛϹĸꓝ𝟪BⲟуⴹхƍоI𝕌h𝟧yЕꙄ6pcɌωӠ2QCmɡoŪ𝟢PЈꙄɌꓦFƎ𝕌ĵΝ9ᴛŪⲔꙄυϹZ𝟪GꓗоƏƶꜱkzԁĸĸes𝟙ƦΒ𝟤mⲦIk"
-"signdate": "2025-12-02T06:36:40.598Z",
+SPDX-License-Identifier: Proprietary
+"signature": "ᎬꓑBģʈJꓐƏо𝟪b2ƐĵFᴛ৭ɅqϹꓜ𝙰ꓑaꓪⲘωꓔƍАƲⲘƟΚᎪ𝟑sᎠɪᏮ𝟣µꓖꓗԁƌРꓑiFta7𝟟ŧցΟȣYОοꓑȢJUoτƳһOƘXЅQk2ꓝƿdАꓳI9ꓔꓗĵЈ9τµHƊ05aWƖɊ2еƌΑyƛ𝟛ϹƳН9"
+"signdate": "2025-12-06T08:15:47.804Z",
 """
 
 import os
@@ -264,6 +264,27 @@ CREATE TABLE documents(
   - vec_distance_cosine(v1, v2) -> float: Cosine similarity (range 0-1, lower=more similar)
   - vec_distance_L2(v1, v2) -> float: Euclidean distance (range 0-inf, lower=more similar)
   - vec_distance_L1(v1, v2) -> float: Manhattan distance (range 0-inf, lower=more similar)
+
+## Sortable Binary Encoding Functions (BES19):
+Store numbers in BLOBs that sort correctly with raw byte comparison (ORDER BY works on BLOBs).
+
+**Encode (number -> sortable BLOB):**
+- to_u16bes(n), to_u32bes(n), to_u64bes(n) - unsigned integers
+- to_i16bes(n), to_i32bes(n), to_i64bes(n) - signed integers  
+- to_f16bes(n), to_f32bes(n), to_f64bes(n) - IEEE 754 floats
+- to_t64bes() - current time as epoch microseconds (no args, sortable timestamp)
+
+**Decode (BLOB -> number):**
+- from_u16bes(b), from_u32bes(b), from_u64bes(b) - unsigned integers
+- from_i16bes(b), from_i32bes(b), from_i64bes(b) - signed integers
+- from_f16bes(b), from_f32bes(b), from_f64bes(b) - IEEE 754 floats
+
+**Example:**
+```sql
+CREATE TABLE events(id INTEGER PRIMARY KEY, ts BLOB, value BLOB);
+INSERT INTO events(ts, value) VALUES (to_t64bes(), to_f64bes(-3.14));
+SELECT from_i64bes(ts), from_f64bes(value) FROM events ORDER BY ts;
+```
 
 ## Return Format:
 - operation_was_successful: boolean
